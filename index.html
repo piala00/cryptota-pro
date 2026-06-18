@@ -1493,17 +1493,32 @@ async function scanBinanceTickers() {
 }
 
 async function scanPionexTickers() {
-  const r = await fetchWithTimeout('https://api.pionex.com/api/v1/market/tickers?type=SPOT', 10000);
-  if (!r.ok) throw new Error('Pionex scan failed');
-  const j = await r.json();
-  const list = j?.data?.tickers || [];
-  return list
-    .filter(t => t.symbol.endsWith('_USDT'))
-    .map(t => {
-      const open = +t.open, close = +t.close;
-      return { symbol: t.symbol.replace(/_USDT$/,''), change: open?((close-open)/open*100):0, volume: +t.amount, exchange: 'Pionex' };
-    })
-    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+  // L'API Pionex ne renvoie pas d'en-tête CORS → passe par un relais si l'appel direct échoue
+  const apiUrl = 'https://api.pionex.com/api/v1/market/tickers?type=SPOT';
+  const proxies = [
+    u => u,
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+  ];
+  let lastErr;
+  for (const proxy of proxies) {
+    try {
+      const r = await fetchWithTimeout(proxy(apiUrl), 10000);
+      if (!r.ok) { lastErr = new Error('HTTP '+r.status); continue; }
+      let j = await r.json();
+      if (typeof j?.contents === 'string') j = JSON.parse(j.contents);
+      const list = j?.data?.tickers || [];
+      if (!list.length) { lastErr = new Error('vide'); continue; }
+      return list
+        .filter(t => t.symbol.endsWith('_USDT'))
+        .map(t => {
+          const open = +t.open, close = +t.close;
+          return { symbol: t.symbol.replace(/_USDT$/,''), change: open?((close-open)/open*100):0, volume: +t.amount, exchange: 'Pionex' };
+        })
+        .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+    } catch(e) { lastErr = e; }
+  }
+  throw new Error('Pionex scan failed: ' + (lastErr?.message || '?'));
 }
 
 async function scanOKXTickers() {
