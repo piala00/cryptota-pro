@@ -392,6 +392,17 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .sheet-add input { flex: 1; background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 8px 12px; font-size: 13px; text-transform: uppercase; outline: none; }
 .sheet-add input:focus { border-color: var(--accent); }
 .sheet-add button { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 8px 16px; font-weight: 700; cursor: pointer; }
+
+/* ── SCANNER CHIPS ── */
+.scan-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 20px; padding: 6px 12px; font-size: 12px;
+  cursor: pointer; user-select: none; transition: all .2s;
+}
+.scan-chip input { accent-color: var(--accent); cursor: pointer; }
+.scan-chip:has(input:checked) { border-color: var(--accent); background: rgba(124,77,255,.12); color: var(--accent); }
+.scan-chip.cat:has(input:checked) { border-color: var(--orange); background: rgba(255,171,64,.12); color: var(--orange); }
 .sheet-list { flex: 1; overflow-y: auto; padding: 10px; }
 </style>
 </head>
@@ -542,18 +553,37 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 <!-- SCANNER MODAL -->
 <div class="sheet-overlay" id="scan-overlay" onclick="closeScanner()"></div>
-<div class="sheet" id="scan-sheet" style="max-height:85dvh">
+<div class="sheet" id="scan-sheet" style="max-height:90dvh">
   <div class="sheet-handle"></div>
   <div class="sheet-head">
-    <h2>🔍 Scanner Pionex + Binance</h2>
+    <h2>🔍 Scanner</h2>
     <button class="sheet-close" onclick="closeScanner()">×</button>
   </div>
-  <div style="padding:12px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)">
-    Scanne les tokens les plus actifs des deux exchanges et calcule leur score technique automatiquement.
+
+  <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
+    <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Plateformes</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="scan-platforms">
+      <label class="scan-chip"><input type="checkbox" value="Binance" checked> Binance</label>
+      <label class="scan-chip"><input type="checkbox" value="Pionex" checked> Pionex</label>
+      <label class="scan-chip"><input type="checkbox" value="OKX"> OKX</label>
+      <label class="scan-chip"><input type="checkbox" value="MEXC"> MEXC</label>
+      <label class="scan-chip"><input type="checkbox" value="Gate.io"> Gate.io</label>
+      <label class="scan-chip"><input type="checkbox" value="KuCoin"> KuCoin</label>
+    </div>
+    <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Catégorie</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" id="scan-category">
+      <label class="scan-chip cat"><input type="radio" name="scancat" value="signal" checked> 🎯 Meilleur signal</label>
+      <label class="scan-chip cat"><input type="radio" name="scancat" value="gainers"> 📈 Top Gainers</label>
+      <label class="scan-chip cat"><input type="radio" name="scancat" value="losers"> 📉 Top Losers</label>
+      <label class="scan-chip cat"><input type="radio" name="scancat" value="volume"> 🔥 Plus de Volume</label>
+      <label class="scan-chip cat"><input type="radio" name="scancat" value="accum"> 🧊 Accumulation</label>
+    </div>
+    <button class="refresh-btn" style="background:linear-gradient(135deg,#ffab40,#ff6e40);width:100%;padding:11px;font-size:14px" onclick="runScanner()">🔍 Lancer le scan</button>
   </div>
+
   <div class="sheet-list" id="scan-results">
-    <div style="text-align:center;padding:40px 20px;color:var(--muted)">
-      <button class="refresh-btn" style="background:linear-gradient(135deg,#ffab40,#ff6e40);font-size:14px;padding:12px 24px" onclick="runScanner()">🔍 Lancer le scan</button>
+    <div style="text-align:center;padding:30px 20px;color:var(--muted);font-size:13px">
+      Choisis tes plateformes et la catégorie, puis lance le scan.
     </div>
   </div>
 </div>
@@ -1476,31 +1506,106 @@ async function scanPionexTickers() {
     .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
 }
 
+async function scanOKXTickers() {
+  const r = await fetchWithTimeout('https://www.okx.com/api/v5/market/tickers?instType=SPOT', 10000);
+  if (!r.ok) throw new Error('OKX scan failed');
+  const j = await r.json();
+  const list = j?.data || [];
+  return list
+    .filter(t => t.instId.endsWith('-USDT'))
+    .map(t => {
+      const open = +t.open24h, last = +t.last;
+      return { symbol: t.instId.replace(/-USDT$/,''), change: open?((last-open)/open*100):0, volume: +t.volCcy24h, exchange: 'OKX' };
+    })
+    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+}
+
+async function scanMEXCTickers() {
+  const r = await fetchWithTimeout('https://api.mexc.com/api/v3/ticker/24hr', 10000);
+  if (!r.ok) throw new Error('MEXC scan failed');
+  const data = await r.json();
+  return data
+    .filter(t => t.symbol.endsWith('USDT'))
+    .map(t => ({ symbol: t.symbol.replace(/USDT$/,''), change: +t.priceChangePercent * 100, volume: +t.quoteVolume, exchange: 'MEXC' }))
+    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+}
+
+async function scanGateIOTickers() {
+  const r = await fetchWithTimeout('https://api.gateio.ws/api/v4/spot/tickers', 10000);
+  if (!r.ok) throw new Error('Gate.io scan failed');
+  const data = await r.json();
+  return data
+    .filter(t => t.currency_pair.endsWith('_USDT'))
+    .map(t => ({ symbol: t.currency_pair.replace(/_USDT$/,''), change: +t.change_percentage, volume: +t.quote_volume, exchange: 'Gate.io' }))
+    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+}
+
+async function scanKuCoinTickers() {
+  const r = await fetchWithTimeout('https://api.kucoin.com/api/v1/market/allTickers', 10000);
+  if (!r.ok) throw new Error('KuCoin scan failed');
+  const j = await r.json();
+  const list = j?.data?.ticker || [];
+  return list
+    .filter(t => t.symbol.endsWith('-USDT'))
+    .map(t => ({ symbol: t.symbol.replace(/-USDT$/,''), change: (+t.changeRate || 0) * 100, volume: +t.volValue, exchange: 'KuCoin' }))
+    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+}
+
+const SCANNERS = {
+  Binance: scanBinanceTickers,
+  Pionex:  scanPionexTickers,
+  OKX:     scanOKXTickers,
+  MEXC:    scanMEXCTickers,
+  'Gate.io': scanGateIOTickers,
+  KuCoin:  scanKuCoinTickers,
+};
+
+function getSelectedPlatforms() {
+  return Array.from(document.querySelectorAll('#scan-platforms input:checked')).map(i => i.value);
+}
+function getSelectedCategory() {
+  return document.querySelector('#scan-category input:checked')?.value || 'signal';
+}
+
 async function runScanner() {
   const resEl = document.getElementById('scan-results');
+  const platforms = getSelectedPlatforms();
+  const category = getSelectedCategory();
+
+  if (!platforms.length) {
+    resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--red)">⚠ Sélectionne au moins une plateforme.</div>`;
+    return;
+  }
+
   resEl.innerHTML = `<div style="text-align:center;padding:40px 20px;color:var(--muted)">
     <div style="font-size:32px;margin-bottom:10px">🔍</div>
-    Scan en cours… récupération des marchés Binance + Pionex
+    Scan en cours… récupération de ${platforms.join(', ')}
   </div>`;
 
   let candidates = [];
-  try {
-    const [bin, pio] = await Promise.allSettled([scanBinanceTickers(), scanPionexTickers()]);
-    if (bin.status === 'fulfilled') candidates.push(...bin.value);
-    if (pio.status === 'fulfilled') candidates.push(...pio.value);
-  } catch(e) {}
+  const fetched = await Promise.allSettled(platforms.map(p => SCANNERS[p]()));
+  fetched.forEach(r => { if (r.status === 'fulfilled') candidates.push(...r.value); });
 
   if (!candidates.length) {
     resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--red)">❌ Impossible de récupérer les marchés. Réessaie.</div>`;
     return;
   }
 
-  // Dédoublonne (garde le volume le plus élevé par symbole), trie par volume, garde le top 35
+  // Dédoublonne (garde le volume le plus élevé par symbole)
   const bySymbol = {};
   for (const c of candidates) {
     if (!bySymbol[c.symbol] || c.volume > bySymbol[c.symbol].volume) bySymbol[c.symbol] = c;
   }
-  const top = Object.values(bySymbol).sort((a,b)=>b.volume-a.volume).slice(0, 35);
+  let pool = Object.values(bySymbol);
+
+  // Pré-tri selon la catégorie choisie pour réduire le nombre de tokens à analyser en profondeur
+  if (category === 'gainers') pool = pool.sort((a,b)=>b.change-a.change);
+  else if (category === 'losers') pool = pool.sort((a,b)=>a.change-b.change);
+  else if (category === 'volume') pool = pool.sort((a,b)=>b.volume-a.volume);
+  else if (category === 'accum') pool = pool.filter(t=>Math.abs(t.change)<6).sort((a,b)=>b.volume-a.volume);
+  else pool = pool.sort((a,b)=>b.volume-a.volume); // 'signal' : on part des plus liquides
+
+  const top = pool.slice(0, 35);
 
   resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">
     <div style="font-size:32px;margin-bottom:10px">⚙️</div>
@@ -1519,7 +1624,7 @@ async function runScanner() {
       try {
         const data = await computeAnalysis(c.symbol);
         const ts = computeTradeSetup(data);
-        results.push({ symbol: c.symbol, exchange: SOURCE_LABEL[c.symbol] || c.exchange, score: ts.score, ts, data });
+        results.push({ symbol: c.symbol, exchange: SOURCE_LABEL[c.symbol] || c.exchange, change: c.change, volume: c.volume, score: ts.score, ts, data });
         lastScanResults[c.symbol] = data;
       } catch(e) { /* token illisible, ignore */ }
       done++;
@@ -1528,15 +1633,6 @@ async function runScanner() {
     }
   }
   await Promise.all(Array.from({length: CONCURRENCY}, worker));
-
-  results.sort((a,b) => b.score - a.score);
-  const bestBuys = results.filter(r=>r.score>=2).slice(0,8);
-  const bestSells = results.filter(r=>r.score<=-2).slice(-8).reverse();
-
-  if (!bestBuys.length && !bestSells.length) {
-    resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">Aucun signal fort détecté pour le moment. Réessaie plus tard.</div>`;
-    return;
-  }
 
   function scanCardHTML(r) {
     const inWatchlist = watchlist.includes(r.symbol);
@@ -1561,11 +1657,29 @@ async function runScanner() {
   }
 
   let html = '';
-  if (bestBuys.length) {
-    html += `<div class="sec-title" style="margin-top:4px">🚀 Meilleurs signaux d'achat</div>` + bestBuys.map(scanCardHTML).join('');
+  if (category === 'gainers') {
+    const sorted = [...results].sort((a,b)=>b.change-a.change).slice(0,12);
+    html = `<div class="sec-title" style="margin-top:4px">📈 Top Gainers (24h)</div>` + sorted.map(scanCardHTML).join('');
+  } else if (category === 'losers') {
+    const sorted = [...results].sort((a,b)=>a.change-b.change).slice(0,12);
+    html = `<div class="sec-title" style="margin-top:4px">📉 Top Losers (24h)</div>` + sorted.map(scanCardHTML).join('');
+  } else if (category === 'volume') {
+    const sorted = [...results].sort((a,b)=>b.volume-a.volume).slice(0,12);
+    html = `<div class="sec-title" style="margin-top:4px">🔥 Plus de Volume</div>` + sorted.map(scanCardHTML).join('');
+  } else if (category === 'accum') {
+    const sorted = [...results].sort((a,b)=>b.data.accumScore-a.data.accumScore).slice(0,12);
+    html = `<div class="sec-title" style="margin-top:4px">🧊 Meilleure Accumulation (Volume+Prix plat)</div>` + sorted.map(scanCardHTML).join('');
+  } else {
+    results.sort((a,b) => b.score - a.score);
+    const bestBuys = results.filter(r=>r.score>=2).slice(0,8);
+    const bestSells = results.filter(r=>r.score<=-2).slice(-8).reverse();
+    if (bestBuys.length) html += `<div class="sec-title" style="margin-top:4px">🚀 Meilleurs signaux d'achat</div>` + bestBuys.map(scanCardHTML).join('');
+    if (bestSells.length) html += `<div class="sec-title">🔴 Signaux de vente / à éviter</div>` + bestSells.map(scanCardHTML).join('');
   }
-  if (bestSells.length) {
-    html += `<div class="sec-title">🔴 Signaux de vente / à éviter</div>` + bestSells.map(scanCardHTML).join('');
+
+  if (!html) {
+    resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">Aucun résultat pour cette catégorie. Réessaie plus tard.</div>`;
+    return;
   }
   resEl.innerHTML = html;
 }
