@@ -403,6 +403,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
     <div class="topbar-logo">📊 CryptoTA Pro</div>
     <div class="topbar-time" id="last-update">—</div>
     <div class="topbar-spacer"></div>
+    <button class="refresh-btn" style="background:linear-gradient(135deg,#ffab40,#ff6e40)" onclick="openScanner()">🔍 Scanner</button>
     <button class="refresh-btn" onclick="refreshAll()">⟳ Actualiser</button>
   </div>
 
@@ -537,6 +538,24 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
     <button onclick="addToken(document.getElementById('mob-input').value)">+</button>
   </div>
   <div class="sheet-list" id="mob-list"></div>
+</div>
+
+<!-- SCANNER MODAL -->
+<div class="sheet-overlay" id="scan-overlay" onclick="closeScanner()"></div>
+<div class="sheet" id="scan-sheet" style="max-height:85dvh">
+  <div class="sheet-handle"></div>
+  <div class="sheet-head">
+    <h2>🔍 Scanner Pionex + Binance</h2>
+    <button class="sheet-close" onclick="closeScanner()">×</button>
+  </div>
+  <div style="padding:12px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)">
+    Scanne les tokens les plus actifs des deux exchanges et calcule leur score technique automatiquement.
+  </div>
+  <div class="sheet-list" id="scan-results">
+    <div style="text-align:center;padding:40px 20px;color:var(--muted)">
+      <button class="refresh-btn" style="background:linear-gradient(135deg,#ffab40,#ff6e40);font-size:14px;padding:12px 24px" onclick="runScanner()">🔍 Lancer le scan</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1417,6 +1436,152 @@ function openSheet() {
 function closeSheet() {
   document.getElementById('sheet').classList.remove('open');
   document.getElementById('sheet-overlay').classList.remove('open');
+}
+
+// ================================================================
+// SCANNER — Pionex + Binance, classement automatique par signal
+// ================================================================
+function openScanner() {
+  document.getElementById('scan-sheet').classList.add('open');
+  document.getElementById('scan-overlay').classList.add('open');
+}
+function closeScanner() {
+  document.getElementById('scan-sheet').classList.remove('open');
+  document.getElementById('scan-overlay').classList.remove('open');
+}
+
+const EXCLUDE_PATTERNS = /UP$|DOWN$|BULL$|BEAR$|^USDC|^EUR|^FDUSD|^TUSD|^BUSD/;
+
+async function scanBinanceTickers() {
+  const r = await fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr', 10000);
+  if (!r.ok) throw new Error('Binance scan failed');
+  const data = await r.json();
+  return data
+    .filter(t => t.symbol.endsWith('USDT'))
+    .map(t => ({ symbol: t.symbol.replace(/USDT$/,''), change: +t.priceChangePercent, volume: +t.quoteVolume, exchange: 'Binance' }))
+    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+}
+
+async function scanPionexTickers() {
+  const r = await fetchWithTimeout('https://api.pionex.com/api/v1/market/tickers?type=SPOT', 10000);
+  if (!r.ok) throw new Error('Pionex scan failed');
+  const j = await r.json();
+  const list = j?.data?.tickers || [];
+  return list
+    .filter(t => t.symbol.endsWith('_USDT'))
+    .map(t => {
+      const open = +t.open, close = +t.close;
+      return { symbol: t.symbol.replace(/_USDT$/,''), change: open?((close-open)/open*100):0, volume: +t.amount, exchange: 'Pionex' };
+    })
+    .filter(t => t.symbol && !EXCLUDE_PATTERNS.test(t.symbol) && t.volume > 200000);
+}
+
+async function runScanner() {
+  const resEl = document.getElementById('scan-results');
+  resEl.innerHTML = `<div style="text-align:center;padding:40px 20px;color:var(--muted)">
+    <div style="font-size:32px;margin-bottom:10px">🔍</div>
+    Scan en cours… récupération des marchés Binance + Pionex
+  </div>`;
+
+  let candidates = [];
+  try {
+    const [bin, pio] = await Promise.allSettled([scanBinanceTickers(), scanPionexTickers()]);
+    if (bin.status === 'fulfilled') candidates.push(...bin.value);
+    if (pio.status === 'fulfilled') candidates.push(...pio.value);
+  } catch(e) {}
+
+  if (!candidates.length) {
+    resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--red)">❌ Impossible de récupérer les marchés. Réessaie.</div>`;
+    return;
+  }
+
+  // Dédoublonne (garde le volume le plus élevé par symbole), trie par volume, garde le top 35
+  const bySymbol = {};
+  for (const c of candidates) {
+    if (!bySymbol[c.symbol] || c.volume > bySymbol[c.symbol].volume) bySymbol[c.symbol] = c;
+  }
+  const top = Object.values(bySymbol).sort((a,b)=>b.volume-a.volume).slice(0, 35);
+
+  resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">
+    <div style="font-size:32px;margin-bottom:10px">⚙️</div>
+    Analyse technique de ${top.length} tokens… <span id="scan-progress">0/${top.length}</span>
+  </div>`;
+
+  // Analyse avec concurrence limitée (8 en parallèle) pour rester rapide sans spammer les APIs
+  const results = [];
+  lastScanResults = {};
+  let done = 0;
+  const CONCURRENCY = 8;
+  const queue = [...top];
+  async function worker() {
+    while (queue.length) {
+      const c = queue.shift();
+      try {
+        const data = await computeAnalysis(c.symbol);
+        const ts = computeTradeSetup(data);
+        results.push({ symbol: c.symbol, exchange: SOURCE_LABEL[c.symbol] || c.exchange, score: ts.score, ts, data });
+        lastScanResults[c.symbol] = data;
+      } catch(e) { /* token illisible, ignore */ }
+      done++;
+      const p = document.getElementById('scan-progress');
+      if (p) p.textContent = `${done}/${top.length}`;
+    }
+  }
+  await Promise.all(Array.from({length: CONCURRENCY}, worker));
+
+  results.sort((a,b) => b.score - a.score);
+  const bestBuys = results.filter(r=>r.score>=2).slice(0,8);
+  const bestSells = results.filter(r=>r.score<=-2).slice(-8).reverse();
+
+  if (!bestBuys.length && !bestSells.length) {
+    resEl.innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted)">Aucun signal fort détecté pour le moment. Réessaie plus tard.</div>`;
+    return;
+  }
+
+  function scanCardHTML(r) {
+    const inWatchlist = watchlist.includes(r.symbol);
+    return `
+      <div class="tcard">
+        <div class="tcard-top">
+          <span class="tcard-sym">${r.symbol}</span>
+          <span class="tcard-src">${r.exchange}</span>
+        </div>
+        <div class="tcard-price">${fmtP(r.data.currentPrice)}</div>
+        <div class="tcard-row">
+          <span class="tcard-change ${r.data.change24h>=0?'pos':'neg'}">${fmtPct(r.data.change24h)} 24h</span>
+          <span class="sig-pill ${r.ts.key}">${r.ts.icon} ${r.ts.label}</span>
+        </div>
+        <button onclick="addFromScanner('${r.symbol}')" ${inWatchlist?'disabled':''}
+          style="width:100%;margin-top:8px;padding:7px;border-radius:8px;border:1px solid var(--border);
+          background:${inWatchlist?'var(--bg4)':'var(--accent)'};color:${inWatchlist?'var(--muted)':'#fff'};
+          font-weight:700;font-size:12px;cursor:${inWatchlist?'default':'pointer'}">
+          ${inWatchlist ? '✓ Déjà ajouté' : '+ Ajouter à la watchlist'}
+        </button>
+      </div>`;
+  }
+
+  let html = '';
+  if (bestBuys.length) {
+    html += `<div class="sec-title" style="margin-top:4px">🚀 Meilleurs signaux d'achat</div>` + bestBuys.map(scanCardHTML).join('');
+  }
+  if (bestSells.length) {
+    html += `<div class="sec-title">🔴 Signaux de vente / à éviter</div>` + bestSells.map(scanCardHTML).join('');
+  }
+  resEl.innerHTML = html;
+}
+
+let lastScanResults = {}; // symbol -> { data, score } — réutilisé pour ajout instantané
+
+function addFromScanner(sym) {
+  if (watchlist.includes(sym)) return;
+  watchlist.push(sym); saveWL();
+  if (lastScanResults[sym]) { cache[sym] = lastScanResults[sym]; saveCacheToStorage(); }
+  renderLists();
+  showToast(`✓ ${sym} ajouté à la watchlist`, 'green');
+  document.querySelectorAll(`#scan-results button[onclick="addFromScanner('${sym}')"]`).forEach(b => {
+    b.disabled = true; b.textContent = '✓ Déjà ajouté';
+    b.style.background = 'var(--bg4)'; b.style.color = 'var(--muted)';
+  });
 }
 
 // ================================================================
