@@ -738,6 +738,37 @@ function calcFib(high, low) {
 // ================================================================
 // ANALYSIS ENGINE
 // ================================================================
+function detectDivergence(closes, rsi, lookback = 20) {
+  // Compare le 2e plus bas creux récent vs le creux le plus récent (prix et RSI)
+  // Divergence haussière : prix fait un plus bas plus bas, RSI fait un plus bas plus haut → signal d'achat fort
+  // Divergence baissière : prix fait un plus haut plus haut, RSI fait un plus haut plus bas → signal de vente fort
+  const n = closes.length;
+  const start = Math.max(1, n - lookback);
+  let lowIdx1 = -1, lowIdx2 = -1, highIdx1 = -1, highIdx2 = -1;
+
+  // Trouve les 2 creux locaux et les 2 sommets locaux dans la fenêtre
+  const lows = [], highs = [];
+  for (let i = start + 1; i < n - 1; i++) {
+    if (closes[i] < closes[i-1] && closes[i] < closes[i+1]) lows.push(i);
+    if (closes[i] > closes[i-1] && closes[i] > closes[i+1]) highs.push(i);
+  }
+
+  let result = null;
+  if (lows.length >= 2) {
+    const [i1, i2] = lows.slice(-2);
+    if (closes[i2] < closes[i1] && rsi[i2] > rsi[i1] && rsi[i2] != null && rsi[i1] != null) {
+      result = { type: 'bullish', text: 'Divergence haussière RSI détectée — prix plus bas, RSI plus haut (signal de retournement fort)' };
+    }
+  }
+  if (!result && highs.length >= 2) {
+    const [i1, i2] = highs.slice(-2);
+    if (closes[i2] > closes[i1] && rsi[i2] < rsi[i1] && rsi[i2] != null && rsi[i1] != null) {
+      result = { type: 'bearish', text: 'Divergence baissière RSI détectée — prix plus haut, RSI plus bas (signal de retournement fort)' };
+    }
+  }
+  return result;
+}
+
 async function computeAnalysis(symbol) {
   const klines = await fetchKlines(symbol, 90);
   const closes = klines.map(k=>k.close);
@@ -789,10 +820,20 @@ async function computeAnalysis(symbol) {
   if (volSpike>10) signals.push({name:'Spike ×'+volSpike.toFixed(0), val:fmtVol(maxVol), type:'hot', note:'Intérêt institutionnel détecté'});
   else if (volSpike>3) signals.push({name:'Volume ×'+volSpike.toFixed(1), val:fmtVol(maxVol), type:'warning', note:'Activité anormale'});
 
+  const divergence = detectDivergence(closes, rsi);
+  if (divergence) {
+    signals.push({
+      name: divergence.type === 'bullish' ? 'Divergence ↑' : 'Divergence ↓',
+      val: divergence.type === 'bullish' ? 'Haussière' : 'Baissière',
+      type: divergence.type === 'bullish' ? 'bull' : 'bear',
+      note: divergence.text
+    });
+  }
+
   return { symbol, klines, closes, volumes, dates, rsi, macd, bb,
            currentRSI, currentBB, currentPrice, prevPrice, change24h,
            ath, atl, fibLevels, avgVol, lastVol, maxVol, volSpike,
-           accumScore, priceVariance, avgLast7Vol,
+           accumScore, priceVariance, avgLast7Vol, divergence,
            lastMACD, lastSignal, lastHist, prevHist, signals };
 }
 
@@ -800,9 +841,12 @@ async function computeAnalysis(symbol) {
 // TRADE SETUP
 // ================================================================
 function computeTradeSetup(data) {
-  const {currentRSI,currentBB,currentPrice,lastHist,prevHist,fibLevels,ath,atl,avgVol,lastVol,accumScore} = data;
+  const {currentRSI,currentBB,currentPrice,lastHist,prevHist,fibLevels,ath,atl,avgVol,lastVol,accumScore,divergence} = data;
   const prevHist2 = data.macd.histogram[data.macd.histogram.length-2];
   let score=0; const reasons=[];
+
+  if (divergence?.type === 'bullish') { score += 3; reasons.push({ok:'ok', text: '🎯 ' + divergence.text}); }
+  else if (divergence?.type === 'bearish') { score -= 3; reasons.push({ok:'no', text: '🎯 ' + divergence.text}); }
 
   if (currentRSI<30)      {score+=2;reasons.push({ok:'ok', text:`RSI oversold (${currentRSI.toFixed(1)}) — zone de rebond contrarian`});}
   else if (currentRSI<45) {score+=1;reasons.push({ok:'mid',text:`RSI bas (${currentRSI.toFixed(1)}) — légèrement favorable`});}
@@ -922,9 +966,21 @@ function cardHTML(sym) {
     </div>`;
 }
 
+function sortedWatchlist() {
+  // Meilleur signal en premier ; tokens non chargés à la fin
+  return [...watchlist].sort((a, b) => {
+    const da = cache[a], db = cache[b];
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return computeTradeSetup(db).score - computeTradeSetup(da).score;
+  });
+}
+
 function renderLists() {
-  document.getElementById('desk-list').innerHTML = watchlist.map(cardHTML).join('');
-  document.getElementById('mob-list').innerHTML  = watchlist.map(cardHTML).join('');
+  const ordered = sortedWatchlist();
+  document.getElementById('desk-list').innerHTML = ordered.map(cardHTML).join('');
+  document.getElementById('mob-list').innerHTML  = ordered.map(cardHTML).join('');
   watchlist.forEach(sym => {
     if (!cache[sym]) setTimeout(()=>{
       const lb=document.getElementById('lb-'+sym); if(lb) lb.style.width='75%';
@@ -1366,10 +1422,37 @@ function closeSheet() {
 // ================================================================
 // LOAD
 // ================================================================
-async function loadToken(sym) {
+const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+function saveCacheToStorage() {
+  try {
+    const payload = {};
+    for (const sym in cache) {
+      payload[sym] = { data: cache[sym], src: SOURCE_LABEL[sym], ts: Date.now() };
+    }
+    localStorage.setItem('cta_cache', JSON.stringify(payload));
+  } catch(e) { console.warn('Cache save failed:', e.message); }
+}
+
+function loadCacheFromStorage() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('cta_cache') || '{}');
+    const now = Date.now();
+    for (const sym in raw) {
+      if (now - raw[sym].ts < CACHE_TTL) {
+        cache[sym] = raw[sym].data;
+        SOURCE_LABEL[sym] = raw[sym].src;
+      }
+    }
+  } catch(e) { console.warn('Cache load failed:', e.message); }
+}
+
+async function loadToken(sym, forceFresh = false) {
+  if (!forceFresh && cache[sym]) { renderLists(); if (activeSymbol===sym) renderDetail(cache[sym]); return; }
   try {
     const data = await computeAnalysis(sym);
     cache[sym] = data;
+    saveCacheToStorage();
     renderLists();
     if (activeSymbol===sym) renderDetail(data);
   } catch(err) {
@@ -1396,7 +1479,7 @@ async function refreshAll() {
   document.getElementById('last-update').textContent='Mise à jour…';
   cache={};
   renderLists();
-  await Promise.allSettled(watchlist.map(s=>loadToken(s)));
+  await Promise.allSettled(watchlist.map(s=>loadToken(s, true)));
   document.getElementById('last-update').textContent='Mis à jour: '+new Date().toLocaleTimeString();
 }
 
@@ -1410,10 +1493,16 @@ function schedMidnight() {
 // INIT
 // ================================================================
 (async function init() {
+  loadCacheFromStorage();
   renderLists();
   schedMidnight();
-  await Promise.allSettled(watchlist.map(s=>loadToken(s)));
-  document.getElementById('last-update').textContent='Mis à jour: '+new Date().toLocaleTimeString();
+  const stale = watchlist.filter(s => !cache[s]);
+  if (stale.length) {
+    await Promise.allSettled(stale.map(s=>loadToken(s)));
+  }
+  document.getElementById('last-update').textContent = stale.length
+    ? 'Mis à jour: '+new Date().toLocaleTimeString()
+    : 'Cache (< 15 min)';
   if (watchlist.length) selectToken(watchlist[0]);
 })();
 </script>
