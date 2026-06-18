@@ -89,7 +89,28 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
   border-radius: 10px; padding: 8px 14px; font-size: 18px;
   font-weight: 700; cursor: pointer; line-height: 1;
 }
-.token-list { flex: 1; overflow-y: auto; padding: 10px; }
+/* ── SORT + IMPORT TOOLBAR ── */
+.sort-select {
+  width: 100%; margin-top: 8px; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); border-radius: 10px; padding: 8px 10px; font-size: 12px;
+  outline: none; cursor: pointer; appearance: none;
+}
+.sort-select:focus { border-color: var(--accent); }
+.import-btn {
+  width: 100%; margin-top: 8px; background: linear-gradient(135deg,#00C087,#00a070);
+  color: #fff; border: none; border-radius: 10px; padding: 9px 10px;
+  font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.import-btn:active { opacity: .8; }
+.sheet-toolbar { display: flex; gap: 8px; padding: 0 16px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.sheet-toolbar .sort-select, .sheet-toolbar .import-btn { margin-top: 0; }
+.platform-group-title {
+  font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px;
+  padding: 10px 4px 6px; display: flex; align-items: center; gap: 6px;
+}
+.platform-group-title .dot { width: 6px; height: 6px; border-radius: 50%; }
+
+.token-list { flex: 1; overflow-y: auto; padding: 10px; -webkit-overflow-scrolling: touch; }
 .token-list::-webkit-scrollbar { width: 4px; }
 .token-list::-webkit-scrollbar-track { background: transparent; }
 .token-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
@@ -343,13 +364,22 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 }
 .mnav-btn {
   display: flex; flex-direction: column; align-items: center;
-  gap: 2px; padding: 6px 12px;
+  gap: 2px; padding: 8px 14px; min-width: 56px; min-height: 44px;
   border: none; background: none; color: var(--muted);
   font-size: 11px; cursor: pointer; border-radius: 10px;
-  transition: all .2s; white-space: nowrap; flex-shrink: 0;
+  transition: transform .15s, background .2s, color .2s; white-space: nowrap; flex-shrink: 0;
 }
+.mnav-btn:active { transform: scale(0.92); }
 .mnav-btn .micon { font-size: 20px; line-height: 1; }
 .mnav-btn.active { color: var(--accent); background: rgba(124,77,255,.1); }
+
+/* Zones tactiles confortables (min 44px recommandé) */
+.tcard-del { min-width: 32px; min-height: 32px; display: flex; align-items: center; justify-content: center; }
+.sheet-close { min-width: 40px; min-height: 40px; }
+.tcard { -webkit-tap-highlight-color: transparent; }
+.tcard:active { transform: scale(0.985); transition: transform .1s; }
+button, .tab-btn, .refresh-btn { -webkit-tap-highlight-color: transparent; }
+.refresh-btn:active, .tab-btn:active { transform: scale(0.96); }
 
 /* ── RESPONSIVE ── */
 @media (max-width: 768px) {
@@ -427,6 +457,13 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
           <input id="desk-input" placeholder="Symbole ou lien exchange" maxlength="300" onkeydown="if(event.key==='Enter')addToken(this.value)">
           <button onclick="addToken(document.getElementById('desk-input').value)">+</button>
         </div>
+        <select id="desk-sort" class="sort-select" onchange="setSortMode(this.value)">
+          <option value="signal">🎯 Trier par signal</option>
+          <option value="platform">🏛 Trier par plateforme</option>
+          <option value="change">📊 Trier par variation 24h</option>
+          <option value="alpha">🔤 Trier alphabétique</option>
+        </select>
+        <button class="import-btn" onclick="importTopPionex()">⬇ Importer Top Pionex</button>
       </div>
       <div class="token-list" id="desk-list"></div>
     </div>
@@ -547,6 +584,15 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
   <div class="sheet-add">
     <input id="mob-input" placeholder="Symbole ou lien exchange" maxlength="300" onkeydown="if(event.key==='Enter')addToken(this.value)">
     <button onclick="addToken(document.getElementById('mob-input').value)">+</button>
+  </div>
+  <div class="sheet-toolbar">
+    <select id="mob-sort" class="sort-select" onchange="setSortMode(this.value)">
+      <option value="signal">🎯 Signal</option>
+      <option value="platform">🏛 Plateforme</option>
+      <option value="change">📊 Variation</option>
+      <option value="alpha">🔤 A-Z</option>
+    </select>
+    <button class="import-btn" onclick="importTopPionex()">⬇ Top Pionex</button>
   </div>
   <div class="sheet-list" id="mob-list"></div>
 </div>
@@ -1015,9 +1061,38 @@ function cardHTML(sym) {
     </div>`;
 }
 
+let sortMode = localStorage.getItem('cta_sort') || 'signal';
+
+function setSortMode(mode) {
+  sortMode = mode;
+  localStorage.setItem('cta_sort', mode);
+  ['desk-sort','mob-sort'].forEach(id => { const el = document.getElementById(id); if (el) el.value = mode; });
+  renderLists();
+}
+
+const PLATFORM_COLOR = { Binance:'#F3BA2F', OKX:'#cccccc', Pionex:'#00C087', 'Gate.io':'#e74c3c', MEXC:'#3b82f6', KuCoin:'#23af91' };
+
 function sortedWatchlist() {
-  // Meilleur signal en premier ; tokens non chargés à la fin
-  return [...watchlist].sort((a, b) => {
+  const list = [...watchlist];
+  if (sortMode === 'platform') {
+    return list.sort((a, b) => {
+      const pa = SOURCE_LABEL[a] || 'zzz', pb = SOURCE_LABEL[b] || 'zzz';
+      if (pa !== pb) return pa.localeCompare(pb);
+      return a.localeCompare(b);
+    });
+  }
+  if (sortMode === 'alpha') return list.sort((a,b) => a.localeCompare(b));
+  if (sortMode === 'change') {
+    return list.sort((a,b) => {
+      const da = cache[a], db = cache[b];
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return db.change24h - da.change24h;
+    });
+  }
+  // 'signal' (par défaut) : meilleur score en premier, non chargés à la fin
+  return list.sort((a, b) => {
     const da = cache[a], db = cache[b];
     if (!da && !db) return 0;
     if (!da) return 1;
@@ -1026,10 +1101,27 @@ function sortedWatchlist() {
   });
 }
 
+function renderTokenListHTML(ordered) {
+  if (sortMode !== 'platform') return ordered.map(cardHTML).join('');
+  // Regroupe visuellement par plateforme avec un en-tête de section
+  let html = '', lastPlatform = null;
+  for (const sym of ordered) {
+    const platform = SOURCE_LABEL[sym] || 'Non chargé';
+    if (platform !== lastPlatform) {
+      const color = PLATFORM_COLOR[platform] || 'var(--muted)';
+      html += `<div class="platform-group-title"><span class="dot" style="background:${color}"></span>${platform}</div>`;
+      lastPlatform = platform;
+    }
+    html += cardHTML(sym);
+  }
+  return html;
+}
+
 function renderLists() {
   const ordered = sortedWatchlist();
-  document.getElementById('desk-list').innerHTML = ordered.map(cardHTML).join('');
-  document.getElementById('mob-list').innerHTML  = ordered.map(cardHTML).join('');
+  const html = renderTokenListHTML(ordered);
+  document.getElementById('desk-list').innerHTML = html;
+  document.getElementById('mob-list').innerHTML  = html;
   watchlist.forEach(sym => {
     if (!cache[sym]) setTimeout(()=>{
       const lb=document.getElementById('lb-'+sym); if(lb) lb.style.width='75%';
@@ -1093,6 +1185,26 @@ function addToken(val) {
   watchlist.push(sym); saveWL(); clearInputs();
   renderLists();
   loadToken(sym);
+}
+
+async function importTopPionex(count = 10) {
+  showToast('⬇ Récupération du Top Pionex…', 'yellow');
+  try {
+    const tickers = await scanPionexTickers();
+    const top = tickers.sort((a,b) => b.volume - a.volume).slice(0, count);
+    let added = 0;
+    for (const t of top) {
+      if (!watchlist.includes(t.symbol)) { watchlist.push(t.symbol); added++; }
+    }
+    if (!added) { showToast('Tous ces tokens sont déjà dans ta watchlist', 'yellow'); return; }
+    saveWL();
+    renderLists();
+    showToast(`✓ ${added} tokens Pionex ajoutés`, 'green');
+    await Promise.allSettled(top.map(t => loadToken(t.symbol)));
+  } catch(e) {
+    showToast('❌ Import Pionex échoué — réessaie', 'red');
+    console.error(e);
+  }
 }
 
 function showToast(msg, color) {
@@ -1480,6 +1592,35 @@ function closeScanner() {
   document.getElementById('scan-overlay').classList.remove('open');
 }
 
+// ── GESTE : glisser vers le bas pour fermer les panneaux mobiles ──
+function enableSwipeToClose(sheetId, closeFn) {
+  const el = document.getElementById(sheetId);
+  if (!el) return;
+  let startY = 0, currentY = 0, dragging = false;
+  el.addEventListener('touchstart', e => {
+    if (e.touches[0].clientY - el.getBoundingClientRect().top > 60) return; // seulement près du handle
+    startY = currentY = e.touches[0].clientY;
+    dragging = true;
+    el.style.transition = 'none';
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    if (!dragging) return;
+    currentY = e.touches[0].clientY;
+    const dy = Math.max(0, currentY - startY);
+    el.style.transform = `translateY(${dy}px)`;
+  }, { passive: true });
+  el.addEventListener('touchend', () => {
+    if (!dragging) return;
+    dragging = false;
+    el.style.transition = 'transform .3s ease';
+    const dy = currentY - startY;
+    if (dy > 90) { closeFn(); }
+    el.style.transform = '';
+  });
+}
+enableSwipeToClose('sheet', closeSheet);
+enableSwipeToClose('scan-sheet', closeScanner);
+
 const EXCLUDE_PATTERNS = /UP$|DOWN$|BULL$|BEAR$|^USDC|^EUR|^FDUSD|^TUSD|^BUSD/;
 
 async function scanBinanceTickers() {
@@ -1788,6 +1929,7 @@ function schedMidnight() {
 // ================================================================
 (async function init() {
   loadCacheFromStorage();
+  ['desk-sort','mob-sort'].forEach(id => { const el = document.getElementById(id); if (el) el.value = sortMode; });
   renderLists();
   schedMidnight();
   const stale = watchlist.filter(s => !cache[s]);
